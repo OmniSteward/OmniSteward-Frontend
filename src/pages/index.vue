@@ -204,6 +204,53 @@ function float32ArrayToWav(audioData: Float32Array, sampleRate = 16000): Blob {
   return blob
 }
 
+async function handleReader(reader:any) {
+  let buffer = '' // 用于存储未完成的数据块
+    
+  // 读取流数据
+  while (true) {
+    const { done, value } = await reader.read()
+    if (done) break
+    
+    const text = new TextDecoder().decode(value)
+    buffer += text
+    
+    // 按 <split> 分割数据块
+    const chunks = buffer.split('<split>')
+    
+    // 处理除最后一块外的所有完整数据块（直接作为文本处理）
+    for (let i = 0; i < chunks.length - 1; i++) {
+      const chunk = chunks[i]
+      if (!chunk.trim()) continue
+      
+      console.log("文本块:", chunk)
+      streamingResult.value.push(chunk)
+      uploadResult.value.push({ sender: 'system', text: chunk })
+    }
+    
+    // 保存最后一个不完整的数据块
+    buffer = chunks[chunks.length - 1]
+  }
+  
+  // 处理最后可能剩余的数据（尝试解析为JSON）
+  if (buffer.trim()) {
+    try {
+      const jsonData = JSON.parse(buffer)
+      if (jsonData.history_id) {
+        history_id.value = jsonData.history_id
+        // uploadResult.value.push({ sender: 'system', text: '已更新对话ID' })
+        console.log('更新history_id:', history_id.value)
+      }
+    } catch (jsonError) {
+      // 如果解析失败，作为普通文本处理
+      if (buffer.trim()) {
+        streamingResult.value.push(buffer)
+        uploadResult.value.push({ sender: 'system', text: buffer })
+      }
+    }
+  }
+}
+
 // 网络请求相关函数
 async function sendAudioToServer(audioData: Float32Array) {
   try {
@@ -216,35 +263,15 @@ async function sendAudioToServer(audioData: Float32Array) {
     const filename = `speech_${timestamp}.wav`
     
     formData.append('audio', audioBlob, filename)
-    formData.append('model', selectedModel.value.id)
-    if(history_id.value){
-      formData.append('history_id', history_id.value)
-    }
-    const response = await fetch(`${window.location.origin}/api/upload-audio`, {
+    
+    const response = await fetch(`${window.location.origin}/api/transcribe`, {
       method: 'POST',
       body: formData
     })
-
-    const reader = response.body?.getReader()
-    if (!reader) {
-      throw new Error('无法获取响应流')
-    }
-
-    uploadStatus.value = '接收中...'
+    const text = (await response.json())['text']
+    sendMessageToServer(text)
     
-    // 读取流数据
-    while (true) {
-      const { done, value } = await reader.read()
-      if (done) break
-      
-      // 将 Uint8Array 转换为文本
-      const text = new TextDecoder().decode(value)
-      streamingResult.value.push(text)
-      console.log(text);
-      uploadResult.value.push({ sender: 'system', text })
-    }
     
-    uploadStatus.value = '完成'
   } catch (error: any) {
     uploadStatus.value = `失败: ${error.message}`
     console.error('上传音频时出错:', error)
@@ -253,11 +280,13 @@ async function sendAudioToServer(audioData: Float32Array) {
 
 async function sendMessage() {
   if (!inputMessage.value.trim()) return
-  
   const message = inputMessage.value
-  uploadResult.value.push({ sender: 'user', text: message })
   inputMessage.value = ''
+  sendMessageToServer(message)
+}
 
+async function sendMessageToServer(message: string) {
+  uploadResult.value.push({ sender: 'user', text: message })
   const payload = {
     query: message,
     model: selectedModel.value.id,
@@ -277,53 +306,9 @@ async function sendMessage() {
     if (!reader) {
       throw new Error('无法获取响应流')
     }
-    
-    let buffer = '' // 用于存储未完成的数据块
-    
-    // 读取流数据
-    while (true) {
-      const { done, value } = await reader.read()
-      if (done) break
-      
-      const text = new TextDecoder().decode(value)
-      buffer += text
-      
-      // 按 <split> 分割数据块
-      const chunks = buffer.split('<split>')
-      
-      // 处理除最后一块外的所有完整数据块（直接作为文本处理）
-      for (let i = 0; i < chunks.length - 1; i++) {
-        const chunk = chunks[i]
-        if (!chunk.trim()) continue
-        
-        console.log("文本块:", chunk)
-        streamingResult.value.push(chunk)
-        uploadResult.value.push({ sender: 'system', text: chunk })
-      }
-      
-      // 保存最后一个不完整的数据块
-      buffer = chunks[chunks.length - 1]
-    }
-    
-    // 处理最后可能剩余的数据（尝试解析为JSON）
-    if (buffer.trim()) {
-      try {
-        const jsonData = JSON.parse(buffer)
-        if (jsonData.history_id) {
-          history_id.value = jsonData.history_id
-          // uploadResult.value.push({ sender: 'system', text: '已更新对话ID' })
-          console.log('更新history_id:', history_id.value)
-        }
-      } catch (jsonError) {
-        // 如果解析失败，作为普通文本处理
-        if (buffer.trim()) {
-          streamingResult.value.push(buffer)
-          uploadResult.value.push({ sender: 'system', text: buffer })
-        }
-      }
-    }
+    handleReader(reader)
   } catch (error: any) {
-    console.error('发送消息失败:', error)
+    console.error('发送消息时出错:', error)
   }
 }
 
