@@ -49,14 +49,15 @@
         <!-- 聊天消息 -->
         <div class="chat-messages overflow-y-auto">
           <!-- 动态消息列表 -->
-          <template v-for="(msg, index) in uploadResult" :key="index">
+          <template v-for="(msg, index) in chatHistory" :key="index">
             <div
               v-if="msg.sender === 'system'"
               class="d-flex mb-4"
             >
               <v-avatar color="primary" size="40" class="mr-3">OS</v-avatar>
               <v-card max-width="80%" variant="outlined" class="pa-3">
-                <div class="text-body-1">{{ msg.text }}</div>
+                <div v-if="msg.text" class="text-body-1">{{ msg.text }}</div>
+                <div v-if="msg.html" class="text-body-2" v-html="msg.html"></div>
               </v-card>
             </div>
             <div
@@ -64,7 +65,8 @@
               class="d-flex mb-4 justify-end"
             >
               <v-card max-width="80%" variant="outlined" class="pa-3 user-message">
-                <div class="text-body-1">{{ msg.text }}</div>
+                <div v-if="msg.text" class="text-body-1">{{ msg.text }}</div>
+                <div v-if="msg.html" class="text-body-2" v-html="msg.html"></div>
               </v-card>
               <v-avatar color="primary" size="40" class="ml-3">U</v-avatar>
             </div>
@@ -124,7 +126,8 @@ import { ref, onMounted } from 'vue'
 // 类型定义
 interface ChatMessage {
   sender: 'user' | 'system'
-  text: string
+  text?: string
+  html?: string
 }
 
 // 添加模型相关的类型和变量
@@ -154,13 +157,11 @@ const WELCOME_MESSAGE = '👋 你好呀，我是 OmniSteward，你的智能管�
 // 状态变量
 const speechStatus = ref('未检测到语音')
 const vadStatus = ref('未加载')
-const uploadStatus = ref('')
 const isVADRunning = ref(false)
 const inputMessage = ref('')
 const history_id = ref(null)
 // 聊天相关状态
-const uploadResult = ref<ChatMessage[]>([])
-const streamingResult = ref<string[]>([])
+const chatHistory = ref<ChatMessage[]>([])
 
 // VAD 实例
 let myvad: any = null
@@ -204,10 +205,49 @@ function float32ArrayToWav(audioData: Float32Array, sampleRate = 16000): Blob {
   return blob
 }
 
-async function handleReader(reader:any) {
-  let buffer = '' // 用于存储未完成的数据块
+async function handleAction(action: any) {
+  console.log('收到动作:', action)
+  if (action.type === "create_download") {
+    const url = action.url;
+    const file_name = action.file_name;
+    // 创建一个按钮夹在system消息中
+    chatHistory.value.push({
+      sender: 'system',
+      html: `<a href="${url}" download="${file_name}">点击下载 ${file_name}</a>`
+    })
+  }else{
+    console.error('收到未知动作:', action)
+  }
+}
+
+async function handleReader(reader: any) {
+  let buffer = ''
+  
+  // 添加处理数据块的辅助函数
+  const processChunk = (chunk: string) => {
+    if (!chunk.trim()) return
     
-  // 读取流数据
+    try {
+      const jsonData = JSON.parse(chunk)
+      if (jsonData.type === "history") {
+        history_id.value = jsonData.history_id
+        console.log('更新history_id:', history_id.value)
+      } else if (jsonData.type === "content") {
+        chatHistory.value.push({
+          sender: 'system',
+          text: jsonData.content
+        })
+      } else if (jsonData.type === "action") {
+        // 处理动作消息
+        handleAction(jsonData.action)
+      }else{
+        console.error('收到未知消息:', jsonData)
+      }
+    } catch (jsonError) {
+      console.error('解析JSON失败:', jsonError)
+    }
+  }
+    
   while (true) {
     const { done, value } = await reader.read()
     if (done) break
@@ -215,47 +255,25 @@ async function handleReader(reader:any) {
     const text = new TextDecoder().decode(value)
     buffer += text
     
-    // 按 <split> 分割数据块
     const chunks = buffer.split('<split>')
     
-    // 处理除最后一块外的所有完整数据块（直接作为文本处理）
+    // 处理完整的数据块
     for (let i = 0; i < chunks.length - 1; i++) {
-      const chunk = chunks[i]
-      if (!chunk.trim()) continue
-      
-      console.log("文本块:", chunk)
-      streamingResult.value.push(chunk)
-      uploadResult.value.push({ sender: 'system', text: chunk })
+      processChunk(chunks[i])
     }
     
-    // 保存最后一个不完整的数据块
     buffer = chunks[chunks.length - 1]
   }
   
-  // 处理最后可能剩余的数据（尝试解析为JSON）
+  // 处理最后剩余的数据
   if (buffer.trim()) {
-    try {
-      const jsonData = JSON.parse(buffer)
-      if (jsonData.history_id) {
-        history_id.value = jsonData.history_id
-        // uploadResult.value.push({ sender: 'system', text: '已更新对话ID' })
-        console.log('更新history_id:', history_id.value)
-      }
-    } catch (jsonError) {
-      // 如果解析失败，作为普通文本处理
-      if (buffer.trim()) {
-        streamingResult.value.push(buffer)
-        uploadResult.value.push({ sender: 'system', text: buffer })
-      }
-    }
+    processChunk(buffer)
   }
 }
 
 // 网络请求相关函数
 async function sendAudioToServer(audioData: Float32Array) {
   try {
-    uploadStatus.value = '正在上传...'
-    streamingResult.value = []
     const formData = new FormData()
     
     const audioBlob = float32ArrayToWav(audioData)
@@ -273,7 +291,6 @@ async function sendAudioToServer(audioData: Float32Array) {
     
     
   } catch (error: any) {
-    uploadStatus.value = `失败: ${error.message}`
     console.error('上传音频时出错:', error)
   }
 }
@@ -286,7 +303,7 @@ async function sendMessage() {
 }
 
 async function sendMessageToServer(message: string) {
-  uploadResult.value.push({ sender: 'user', text: message })
+  chatHistory.value.push({ sender: 'user', text: message })
   const payload = {
     query: message,
     model: selectedModel.value.id,
@@ -353,12 +370,11 @@ async function toggleVAD() {
 
 // 聊天管理函数
 function clearHistory() {
-  uploadResult.value = []
-  streamingResult.value = []
+  chatHistory.value = []
   inputMessage.value = ''
   history_id.value = null
   
-  uploadResult.value.push({
+  chatHistory.value.push({
     sender: 'system',
     text: WELCOME_MESSAGE
   })
@@ -374,8 +390,8 @@ onMounted(async () => {
     await navigator.mediaDevices.getUserMedia({ audio: true })
     vadStatus.value = '已加载'
     
-    if (uploadResult.value.length === 0) {
-      uploadResult.value.push({
+    if (chatHistory.value.length === 0) {
+      chatHistory.value.push({
         sender: 'system',
         text: WELCOME_MESSAGE 
       })
