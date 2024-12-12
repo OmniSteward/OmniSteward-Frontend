@@ -138,13 +138,31 @@ interface Model {
 
 // 可用的模型列表
 const availableModels = ref<Model[]>([
-  { id: 'Qwen/Qwen2.5-7B-Instruct', name: 'Qwen2.5-7B' },
-  { id: 'Qwen/Qwen2.5-14B-Instruct', name: 'Qwen2.5-14B' },
-  { id: 'Qwen/Qwen2.5-32B-Instruct', name: 'Qwen2.5-32B' },
+  // 添加一个默认模型
+  { id: 'default', name: '默认模型' }
 ])
 
-// 当前选中的模型
+// 修改当前选中的模型的定义
 const selectedModel = ref<Model>(availableModels.value[0])
+
+// 修改获取模型列表的函数
+async function fetchModels() {
+  try {
+    const response = await fetch(`${window.location.origin}/api/models`)
+    console.log(response)
+    const models = await response.json()
+    availableModels.value = models.map((model: any) => ({
+      id: model.id,
+      name: model.name || model.id
+    }))
+    // 确保在设置新的模型列表后更新选中的模型
+    selectedModel.value = availableModels.value[0] || { id: 'default', name: '默认模型' }
+  } catch (error) {
+    console.error('获取模型列表失败:', error)
+    // 发生错误时保持使用默认模型
+    selectedModel.value = { id: 'default', name: '默认模型' }
+  }
+}
 
 // 选择模型的方法
 function selectModel(model: Model) {
@@ -382,6 +400,7 @@ function clearHistory() {
 
 // 生命周期钩子
 onMounted(async () => {
+  await fetchModels()
   try {
     if (!navigator.mediaDevices?.getUserMedia) {
       throw new Error('您的浏览器不支持音频输入设备')
