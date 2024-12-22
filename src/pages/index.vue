@@ -97,7 +97,7 @@
               </v-card>
             </div>
             <div
-              v-else
+              v-else-if="msg.sender === 'user'"
               class="d-flex mb-4 justify-end"
             >
               <v-card max-width="80%" variant="outlined" class="pa-3 user-message">
