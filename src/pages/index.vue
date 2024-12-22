@@ -2,6 +2,15 @@
   <v-app>
     <!-- 顶部导航栏 -->
     <v-app-bar app color="white" elevation="1" fixed>
+      <template v-slot:prepend>
+        <v-icon
+          :color="connectionStatus === 'connected' ? 'success' : connectionStatus === 'connecting' ? 'warning' : 'error'"
+          size="small"
+          class="mr-2"
+        >
+          {{ connectionStatus === 'connected' ? 'mdi-cloud-check' : 'mdi-cloud-off-outline' }}
+        </v-icon>
+      </template>
       <v-app-bar-nav-icon></v-app-bar-nav-icon>
       <v-app-bar-title>OmniSteward</v-app-bar-title>
       <v-spacer></v-spacer>
@@ -29,6 +38,28 @@
         </v-list>
       </v-menu>
 
+      <v-menu>
+        <template v-slot:activator="{ props }">
+          <v-btn icon v-bind="props">
+            <v-icon>mdi-cog</v-icon>
+          </v-btn>
+        </template>
+        <v-list>
+          <v-list-subheader>显示的消息类型</v-list-subheader>
+          <v-list-item v-for="type in Object.values(MessageType)" :key="type">
+            <v-list-item-title>
+              <v-checkbox
+                v-model="visibleMessageTypes"
+                :label="type"
+                :value="type"
+                hide-details
+                density="compact"
+              ></v-checkbox>
+            </v-list-item-title>
+          </v-list-item>
+        </v-list>
+      </v-menu>
+
       <v-btn icon><v-icon>mdi-volume-off</v-icon></v-btn>
       <v-btn icon><v-icon>mdi-refresh</v-icon></v-btn>
     </v-app-bar>
@@ -51,13 +82,18 @@
           <!-- 动态消息列表 -->
           <template v-for="(msg, index) in chatHistory" :key="index">
             <div
-              v-if="msg.sender === 'system'"
+              v-if="msg.sender === 'system' && (!msg.type || visibleMessageTypes.includes(msg.type))"
               class="d-flex mb-4"
             >
               <v-avatar color="primary" size="40" class="mr-3">OS</v-avatar>
               <v-card max-width="80%" variant="outlined" class="pa-3">
-                <div v-if="msg.text" class="text-body-1">{{ msg.text }}</div>
-                <div v-if="msg.html" class="text-body-2" v-html="msg.html"></div>
+                <v-expansion-panels v-if="msg.timeInfo">
+                <v-expansion-panel title="消息详情" :text="msg.timeInfo.send_time + '|' + msg.timeInfo.receive_time + '|' + msg.timeInfo.delay + 'ms'" >
+                </v-expansion-panel>
+              </v-expansion-panels>
+                <div v-if="msg.text && !msg.isMarkdown" class="text-body-1">{{ msg.text }}</div>
+                <div v-else-if="msg.text && msg.isMarkdown" v-marked:hl="msg.text" style="margin-left: 5px;"></div>
+                <div v-else-if="msg.html" class="text-body-2" v-html="msg.html"></div>
               </v-card>
             </div>
             <div
@@ -122,18 +158,34 @@
 
 <script lang="ts" setup>
 import { ref, onMounted } from 'vue'
+import { socket, sendChatMessage, connectionStatus, reconnect, userId } from "@/utils/socket";
 
+interface TimeInfo{
+  send_time?:string,
+  receive_time?:string,
+  delay?:number
+}
 // 类型定义
 interface ChatMessage {
   sender: 'user' | 'system'
+  type?:string,
   text?: string
   html?: string
+  isMarkdown?: boolean,
+  timeInfo?:TimeInfo
 }
 
 // 添加模型相关的类型和变量
 interface Model {
   id: string
   name: string
+}
+
+const visibleMessageTypes = ref<string[]>(['content'])
+
+const MessageType = {
+  content: 'content',
+  debug: 'debug'
 }
 
 // 可用的模型列表
@@ -238,57 +290,6 @@ async function handleAction(action: any) {
   }
 }
 
-async function handleReader(reader: any) {
-  let buffer = ''
-  
-  // 添加处理数据块的辅助函数
-  const processChunk = (chunk: string) => {
-    if (!chunk.trim()) return
-    
-    try {
-      const jsonData = JSON.parse(chunk)
-      if (jsonData.type === "history") {
-        history_id.value = jsonData.history_id
-        console.log('更新history_id:', history_id.value)
-      } else if (jsonData.type === "content") {
-        chatHistory.value.push({
-          sender: 'system',
-          text: jsonData.content
-        })
-      } else if (jsonData.type === "action") {
-        // 处理动作消息
-        handleAction(jsonData.action)
-      }else{
-        console.error('收到未知消息:', jsonData)
-      }
-    } catch (jsonError) {
-      console.error('解析JSON失败:', jsonError)
-    }
-  }
-    
-  while (true) {
-    const { done, value } = await reader.read()
-    if (done) break
-    
-    const text = new TextDecoder().decode(value)
-    buffer += text
-    
-    const chunks = buffer.split('<split>')
-    
-    // 处理完整的数据块
-    for (let i = 0; i < chunks.length - 1; i++) {
-      processChunk(chunks[i])
-    }
-    
-    buffer = chunks[chunks.length - 1]
-  }
-  
-  // 处理最后剩余的数据
-  if (buffer.trim()) {
-    processChunk(buffer)
-  }
-}
-
 // 网络请求相关函数
 async function sendAudioToServer(audioData: Float32Array) {
   try {
@@ -317,6 +318,16 @@ async function sendMessage() {
   if (!inputMessage.value.trim()) return
   const message = inputMessage.value
   inputMessage.value = ''
+  
+  if (connectionStatus.value !== 'connected') {
+    chatHistory.value.push({
+      sender: 'system',
+      text: '网络连接已断开，正在尝试重新连接...'
+    });
+    reconnect();
+    return;
+  }
+  
   sendMessageToServer(message)
 }
 
@@ -329,21 +340,13 @@ async function sendMessageToServer(message: string) {
   }
   
   try {
-    const response = await fetch(`${window.location.origin}/api/chat`, {
-      method: 'POST',
-      headers: {
-        'Content-Type': 'application/json',
-      },
-      body: JSON.stringify(payload)
-    })
-    
-    const reader = response.body?.getReader()
-    if (!reader) {
-      throw new Error('无法获取响应流')
-    }
-    handleReader(reader)
+    sendChatMessage(payload)
   } catch (error: any) {
     console.error('发送消息时出错:', error)
+    chatHistory.value.push({
+      sender: 'system',
+      text: `发送消息失败: ${error.message || '未知错误'}`
+    })
   }
 }
 
@@ -407,19 +410,78 @@ onMounted(async () => {
     }
 
     await navigator.mediaDevices.getUserMedia({ audio: true })
-    vadStatus.value = '已加载'
-    
-    if (chatHistory.value.length === 0) {
-      chatHistory.value.push({
-        sender: 'system',
-        text: WELCOME_MESSAGE 
-      })
-    }
+    vadStatus.value = '已加载' 
   } catch (error: any) {
-    vadStatus.value = '加载失败'
-    console.error('VAD初始化失败:', error)
+    vadStatus.value = '加载失败，无法使用麦克风'
+    console.error('VAD初始化失败，无法使用麦克风:', error)
     speechStatus.value = `错误: ${error.message || '未知错误'}`
   }
+  if (chatHistory.value.length === 0) {
+      chatHistory.value.push({
+        sender: 'system',
+      text: WELCOME_MESSAGE 
+    })
+  }
+})
+
+// 添加 WebSocket 消息处理
+socket.on('message', (message) => {
+  console.log('收到服务器消息:', message)
+  const receive_timestamp = new Date().getTime()
+  const receive_time = new Date(receive_timestamp).toLocaleString() // 接收时间
+  // 将后端戳 转换为时间戳
+  const send_timestamp = new Date(message.send_time).getTime()
+  // 将时间戳转换为时间字符串  
+  const send_time = new Date(message.send_time).toLocaleString()
+  const delay = receive_timestamp - send_timestamp
+  console.log('延迟:', delay)
+
+  const timeInfo:TimeInfo = {
+    send_time: send_time,
+    receive_time: receive_time,
+    delay: delay
+  }
+
+
+  switch (message.type) {
+    case 'history':
+      history_id.value = message.history_id
+      console.log('更新history_id:', history_id.value)
+      break
+      
+    case 'content':
+      chatHistory.value.push({
+        sender: 'system',
+        text: message.data,
+        type: message.type,
+        isMarkdown: true,
+        timeInfo: timeInfo
+      })
+      break
+      
+    case 'action':
+      handleAction(message.action)
+      break
+      
+    default:
+      chatHistory.value.push({
+        sender: 'system',
+        text: `[${message.type}] ${message.data}`,
+        isMarkdown: false,
+        type: message.type,
+        send_time: send_time,
+        receive_time: receive_time,
+        delay: delay
+      })
+  }
+})
+
+socket.on('error', (data) => {
+  console.error('服务器错误:', data.error)
+  chatHistory.value.push({
+    sender: 'system',
+    text: `错误: ${data.error}`
+  })
 })
 </script>
 
