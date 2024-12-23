@@ -181,11 +181,13 @@ interface Model {
   name: string
 }
 
-const visibleMessageTypes = ref<string[]>(['content'])
+const visibleMessageTypes = ref<string[]>(['content','action','error'])
 
 const MessageType = {
   content: 'content',
-  debug: 'debug'
+  debug: 'debug',
+  action: 'action',
+  error: 'error'
 }
 
 // 可用的模型列表
@@ -283,6 +285,7 @@ async function handleAction(action: any) {
     // 创建一个按钮夹在system消息中
     chatHistory.value.push({
       sender: 'system',
+      type: 'action',
       html: `<a href="${url}" download="${file_name}">点击下载 ${file_name}</a>`
     })
   }else{
@@ -426,7 +429,7 @@ onMounted(async () => {
 
 // 添加 WebSocket 消息处理
 socket.on('message', (message) => {
-  console.log('收到服务器消息:', message)
+  console.log(`收到服务器${message.type}消息: `, message)
   const receive_timestamp = new Date().getTime()
   const receive_time = new Date(receive_timestamp).toLocaleString() // 接收时间
   // 将后端戳 转换为时间戳
